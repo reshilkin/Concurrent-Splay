@@ -46,6 +46,7 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 
 import contention.abstractions.CompositionalMap;
 import contention.abstractions.CompositionalMap.Vars;
@@ -66,10 +67,17 @@ import trees.lockbased.stanfordutils.SnapTreeMap;
  * 
  * @author Nathan Bronson
  */
-public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
+public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implements
 		CompositionalMap<K, V> {
 	// public class OptTreeMap<K,V> extends AbstractMap<K,V> implements
 	// ConcurrentMap<K,V> {
+
+
+	static final int ThreadNum = Integer.parseInt(System.getProperty("THREAD_NUM", "1"));
+
+	private double rotateProb() {
+		return 1.0 / (10 * ThreadNum);
+	}
 
 	/**
 	 * This is a special value that indicates the presence of a null value, to
@@ -174,9 +182,7 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 	}
 
 	private static class Node<K, V> {
-		@jdk.internal.vm.annotation.Contended
 		final K key;
-		volatile int height;
 
 		/**
 		 * null means this node is conceptually not present in the map.
@@ -187,17 +193,29 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 		volatile long changeOVL;
 		volatile Node<K, V> left;
 		volatile Node<K, V> right;
+		// Contended ?
+		volatile int selfCnt;
+		volatile int leftCnt;
+		// Выкинуть ?
+		volatile int rightCnt;
 
-		Node(final K key, final int height, final Object vOpt,
-				final Node<K, V> parent, final long changeOVL,
-				final Node<K, V> left, final Node<K, V> right) {
+		Node(
+			final K key,
+			final Object vOpt,
+			final Node<K, V> parent,
+			final long changeOVL,
+			final Node<K, V> left,
+			final Node<K, V> right
+		) {
 			this.key = key;
-			this.height = height;
 			this.vOpt = vOpt;
 			this.parent = parent;
 			this.changeOVL = changeOVL;
 			this.left = left;
 			this.right = right;
+			this.selfCnt = 0;
+			this.leftCnt = 0;
+			this.rightCnt = 0;
 		}
 
 		Node<K, V> child(char dir) {
@@ -242,21 +260,6 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 			}
 			assert (changeOVL != ovl);
 		}
-
-		int validatedHeight() {
-			final int hL = left == null ? 0 : left.validatedHeight();
-			final int hR = right == null ? 0 : right.validatedHeight();
-			assert (Math.abs(hL - hR) <= 1);
-			final int h = 1 + Math.max(hL, hR);
-			assert (h == height);
-			return height;
-		}
-	}
-
-	// ////// node access functions
-
-	private static int height(final Node<?, ?> node) {
-		return node == null ? 0 : node.height;
 	}
 
 	@SuppressWarnings("unchecked")
@@ -272,16 +275,113 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 	// ////////////// state
 
 	private Comparator<? super K> comparator;
-	private final Node<K, V> rootHolder = new Node<K, V>(null, 1, null, null,
-			0L, null, null);
+	private final Node<K, V> rootHolder = new Node<K, V>(null, null, null, 0L, null, null);
 	private final EntrySet entries = new EntrySet();
+
+	private void rebalance(Node<K, V> parent, Node<K, V> node) {
+		int nodePlusLeftCount = node.selfCnt + node.leftCnt;
+		int nodePlusRightCount = node.selfCnt + node.rightCnt;
+		int parentPlusRightCount = parent.selfCnt + parent.rightCnt;
+		int parentPlusLeftCount = parent.selfCnt + parent.leftCnt;
+		int nodeRightCount = node.rightCnt;
+		int nodeLeftCount = node.leftCnt;
+		double k = 1.2;
+
+		//decide whether to perform zig−zag step
+		if (nodeRightCount >= k * parentPlusRightCount){
+			Node grand = parent.parent;
+			synchronized (grand) {
+				if ((grand.left == parent) || (grand.right == parent)) {
+					synchronized (parent) {
+						if (parent.left == node) {
+							synchronized (node) {
+								Node rightChild = node.right;
+								if (rightChild != null){
+									synchronized (rightChild){
+										rotateRightOverLeft_nl(
+											grand,
+											parent,
+											node,
+											rightChild
+										);
+										parent.leftCnt = rightChild.rightCnt;
+										node.rightCnt = rightChild.leftCnt;
+										rightChild.rightCnt += parentPlusRightCount;
+										rightChild.leftCnt += nodePlusLeftCount;
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		} else if (nodeLeftCount >= k * parentPlusLeftCount) {
+			Node grand = parent.parent;
+			synchronized (grand) {
+				if ((grand.left == parent) || (grand.right == parent)) {
+					synchronized (parent) {
+						if (parent.right == node) {
+							synchronized (node) {
+								Node leftChild = node.left;
+								if (leftChild != null){
+									synchronized (leftChild) {
+										rotateLeftOverRight_nl(
+											grand,
+											parent,
+											node,
+											leftChild
+										);
+										parent.rightCnt = leftChild.leftCnt;
+										node.leftCnt = leftChild.rightCnt;
+										leftChild.leftCnt += parentPlusLeftCount;
+										leftChild.rightCnt += nodePlusRightCount;
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		//decide whether to perform zig step
+		} else if (nodePlusLeftCount > k * parentPlusRightCount) {
+			Node grand = parent.parent;
+			synchronized (grand) {
+				if ((grand. left == parent) || (grand.right == parent)) {
+					synchronized (parent) {
+						if (parent.left == node) {
+							synchronized (node) {
+								rotateRight_nl(grand, parent, node, node.right);
+								parent.leftCnt = node.rightCnt;
+								node.rightCnt += parentPlusRightCount;
+							}
+						}
+					}
+				}
+			}
+		} else if (nodePlusRightCount > k * parentPlusLeftCount) {
+			Node grand = parent.parent;
+			synchronized (grand) {
+				if ((grand.left == parent) || (grand.right == parent)) {
+					synchronized (parent) {
+						if (parent.right == node) {
+							synchronized (node) {
+								rotateLeft_nl(grand, parent, node, node.left);
+								parent.rightCnt = node.leftCnt;
+								node.leftCnt += parentPlusLeftCount;
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 
 	// ////////////// public interface
 
-	public LockBasedStanfordTreeMap() {
+	public LockBasedStanfordTreeMapCb() {
 	}
 
-	public LockBasedStanfordTreeMap(final Comparator<? super K> comparator) {
+	public LockBasedStanfordTreeMapCb(final Comparator<? super K> comparator) {
 		this.comparator = comparator;
 	}
 
@@ -306,7 +406,6 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 	@Override
 	public void clear() {
 		synchronized (rootHolder) {
-			rootHolder.height = 1;
 			rootHolder.right = null;
 		}
 	}
@@ -389,8 +488,9 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 				} else if (right == rootHolder.right) {
 					// the reread of .right is the one protected by our read of
 					// ovl
+					boolean doRebalance = ThreadLocalRandom.current().nextDouble() <= rotateProb();
 					final Object vo = attemptGet(k, right, (rightCmp < 0 ? Left
-							: Right), ovl);
+							: Right), ovl, doRebalance);
 					if (vo != SpecialRetry) {
 						if (TRAVERSAL_COUNT) {
 							finishCount1(nodesTraversed);
@@ -404,7 +504,7 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 	}
 
 	private Object attemptGet(final Comparable<? super K> k,
-			final Node<K, V> node, final char dirToC, final long nodeOVL) {
+			final Node<K, V> node, final char dirToC, final long nodeOVL, boolean doRebalance) {
 		int nodesTraversed = 0;
 		while (true) {
 			final Node<K, V> child = node.child(dirToC);
@@ -433,6 +533,10 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 					// how we got here is irrelevant
 					if (TRAVERSAL_COUNT) {
 						finishCount2(nodesTraversed);
+					}
+					if (doRebalance) {
+						child.selfCnt += 1;
+						rebalance(node, child);
 					}
 					return child.vOpt;
 				}
@@ -473,8 +577,15 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 					// traversals were definitely okay. This means that we are
 					// no longer vulnerable to node shrinks, and we don't need
 					// to validate nodeOVL any more.
+					if (doRebalance) {
+						if (childCmp < 0) {
+							child.leftCnt += 1;
+						} else {
+							child.rightCnt += 1;
+						}
+					}
 					final Object vo = attemptGet(k, child, (childCmp < 0 ? Left
-							: Right), childOVL);
+							: Right), childOVL, doRebalance);
 					if (vo != SpecialRetry) {
 						if (TRAVERSAL_COUNT) {
 							finishCount2(nodesTraversed);
@@ -687,9 +798,7 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 	private boolean attemptInsertIntoEmpty(final K key, final Object vOpt) {
 		synchronized (rootHolder) {
 			if (rootHolder.right == null) {
-				rootHolder.right = new Node<K, V>(key, 1, vOpt, rootHolder, 0L,
-						null, null);
-				rootHolder.height = 2;
+				rootHolder.right = new Node<K, V>(key, vOpt, rootHolder, 0L, null, null);
 				return true;
 			} else {
 				return false;
@@ -770,17 +879,11 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 							}
 
 							// Create a new leaf
-							node.setChild(dirToC, new Node<K, V>((K) key, 1,
-									newValue, node, 0L, null, null));
+							node.setChild(dirToC, new Node<K, V>((K) key, newValue, node, 0L, null, null));
 							success = true;
-
-							// attempt to fix node.height while we've still got
-							// the lock
-							damaged = fixHeight_nl(node);
 						}
 					}
 					if (success) {
-						fixHeightAndRebalance(damaged);
 						return null;
 					}
 					// else RETRY
@@ -808,8 +911,16 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 					// traversals were definitely okay. This means that we are
 					// no longer vulnerable to node shrinks, and we don't need
 					// to validate nodeOVL any more.
-					final Object vo = attemptUpdate(key, k, func, expected,
-							newValue, node, child, childOVL);
+					final Object vo = attemptUpdate(
+						key,
+						k,
+						func,
+						expected,
+						newValue,
+						node,
+						child,
+						childOVL
+					);
 					if (vo != SpecialRetry) {
 						return vo;
 					}
@@ -853,10 +964,7 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 						return SpecialRetry;
 					}
 				}
-				// try to fix the parent while we've still got the lock
-				damaged = fixHeight_nl(parent);
 			}
-			fixHeightAndRebalance(damaged);
 			return prev;
 		} else {
 			// potential update (including remove-without-unlink)
@@ -987,10 +1095,7 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 						}
 						// success!
 					}
-					// try to fix parent.height while we've still got the lock
-					damaged = fixHeight_nl(parent);
 				}
-				fixHeightAndRebalance(damaged);
 				return new SimpleImmutableEntry<K, V>(node.key, decodeNull(vo));
 			} else {
 				// keep going down
@@ -1019,219 +1124,12 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 		}
 	}
 
-	// ////////////// tree balance and height info repair
-
-	private static final int UnlinkRequired = -1;
-	private static final int RebalanceRequired = -2;
-	private static final int NothingRequired = -3;
-
-	private int nodeCondition(final Node<K, V> node) {
-		// Begin atomic.
-
-		final Node<K, V> nL = node.left;
-		final Node<K, V> nR = node.right;
-
-		if ((nL == null || nR == null) && node.vOpt == null) {
-			return UnlinkRequired;
-		}
-
-		final int hN = node.height;
-		final int hL0 = height(nL);
-		final int hR0 = height(nR);
-
-		// End atomic. Since any thread that changes a node promises to fix
-		// it, either our read was consistent (and a NothingRequired conclusion
-		// is correct) or someone else has taken responsibility for either node
-		// or one of its children.
-
-		final int hNRepl = 1 + Math.max(hL0, hR0);
-		final int bal = hL0 - hR0;
-
-		if (bal < -1 || bal > 1) {
-			return RebalanceRequired;
-		}
-
-		return hN != hNRepl ? hNRepl : NothingRequired;
-	}
-
-	private void fixHeightAndRebalance(Node<K, V> node) {
-		while (node != null && node.parent != null) {
-			final int condition = nodeCondition(node);
-			if (condition == NothingRequired || isUnlinked(node.changeOVL)) {
-				// nothing to do, or no point in fixing this node
-				return;
-			}
-
-			if (condition != UnlinkRequired && condition != RebalanceRequired) {
-				synchronized (node) {
-					node = fixHeight_nl(node);
-				}
-			} else {
-				final Node<K, V> nParent = node.parent;
-				synchronized (nParent) {
-					if (!isUnlinked(nParent.changeOVL)
-							&& node.parent == nParent) {
-						synchronized (node) {
-							node = rebalance_nl(nParent, node);
-						}
-					}
-					// else RETRY
-				}
-			}
-		}
-	}
-
-	/**
-	 * Attempts to fix the height of a (locked) damaged node, returning the
-	 * lowest damaged node for which this thread is responsible. Returns null if
-	 * no more repairs are needed.
-	 */
-	private Node<K, V> fixHeight_nl(final Node<K, V> node) {
-		final int c = nodeCondition(node);
-		switch (c) {
-		case RebalanceRequired:
-		case UnlinkRequired:
-			// can't repair
-			return node;
-		case NothingRequired:
-			// Any future damage to this node is not our responsibility.
-			return null;
-		default:
-			node.height = c;
-			// we've damaged our parent, but we can't fix it now
-			return node.parent;
-		}
-	}
-
-	/**
-	 * nParent and n must be locked on entry. Returns a damaged node, or null if
-	 * no more rebalancing is necessary.
-	 */
-	private Node<K, V> rebalance_nl(final Node<K, V> nParent, final Node<K, V> n) {
-
-		final Node<K, V> nL = n.left;
-		final Node<K, V> nR = n.right;
-
-		if ((nL == null || nR == null) && n.vOpt == null) {
-			if (attemptUnlink_nl(nParent, n)) {
-				// attempt to fix nParent.height while we've still got the lock
-				return fixHeight_nl(nParent);
-			} else {
-				// retry needed for n
-				return n;
-			}
-		}
-
-		final int hN = n.height;
-		final int hL0 = height(nL);
-		final int hR0 = height(nR);
-		final int hNRepl = 1 + Math.max(hL0, hR0);
-		final int bal = hL0 - hR0;
-
-		if (bal > 1) {
-			return rebalanceToRight_nl(nParent, n, nL, hR0);
-		} else if (bal < -1) {
-			return rebalanceToLeft_nl(nParent, n, nR, hL0);
-		} else if (hNRepl != hN) {
-			// we've got more than enough locks to do a height change, no need
-			// to
-			// trigger a retry
-			n.height = hNRepl;
-
-			// nParent is already locked, let's try to fix it too
-			return fixHeight_nl(nParent);
-		} else {
-			// nothing to do
-			return null;
-		}
-	}
-
-	private Node<K, V> rebalanceToRight_nl(final Node<K, V> nParent,
-			final Node<K, V> n, final Node<K, V> nL, final int hR0) {
-		// L is too large, we will rotate-right. If L.R is taller
-		// than L.L, then we will first rotate-left L.
-		synchronized (nL) {
-			final int hL = nL.height;
-			if (hL - hR0 <= 1) {
-				return n; // retry
-			} else {
-				final Node<K, V> nLR = nL.right;
-				final int hLL0 = height(nL.left);
-				final int hLR0 = height(nLR);
-				if (hLL0 >= hLR0) {
-					// rotate right based on our snapshot of hLR
-					return rotateRight_nl(nParent, n, nL, hR0, hLL0, nLR, hLR0);
-				} else {
-					synchronized (nLR) {
-						// If our hLR snapshot is incorrect then we might
-						// actually need to do a single rotate-right on n.
-						final int hLR = nLR.height;
-						if (hLL0 >= hLR) {
-							return rotateRight_nl(nParent, n, nL, hR0, hLL0,
-									nLR, hLR);
-						} else {
-							// If the underlying left balance would not be
-							// sufficient to actually fix n.left, then instead
-							// of rolling it into a double rotation we do it on
-							// it's own. This may let us avoid rotating n at
-							// all, but more importantly it avoids the creation
-							// of damaged nodes that don't have a direct
-							// ancestry relationship. The recursive call to
-							// rebalanceToRight_nl in this case occurs after we
-							// release the lock on nLR.
-							final int hLRL = height(nLR.left);
-							final int b = hLL0 - hLRL;
-							if (b >= -1 && b <= 1) {
-								// nParent.child.left won't be damaged after a
-								// double rotation
-								return rotateRightOverLeft_nl(nParent, n, nL,
-										hR0, hLL0, nLR, hLRL);
-							}
-						}
-					}
-					// focus on nL, if necessary n will be balanced later
-					return rebalanceToLeft_nl(n, nL, nLR, hLL0);
-				}
-			}
-		}
-	}
-
-	private Node<K, V> rebalanceToLeft_nl(final Node<K, V> nParent,
-			final Node<K, V> n, final Node<K, V> nR, final int hL0) {
-		synchronized (nR) {
-			final int hR = nR.height;
-			if (hL0 - hR >= -1) {
-				return n; // retry
-			} else {
-				final Node<K, V> nRL = nR.left;
-				final int hRL0 = height(nRL);
-				final int hRR0 = height(nR.right);
-				if (hRR0 >= hRL0) {
-					return rotateLeft_nl(nParent, n, hL0, nR, nRL, hRL0, hRR0);
-				} else {
-					synchronized (nRL) {
-						final int hRL = nRL.height;
-						if (hRR0 >= hRL) {
-							return rotateLeft_nl(nParent, n, hL0, nR, nRL, hRL,
-									hRR0);
-						} else {
-							final int hRLR = height(nRL.right);
-							final int b = hRR0 - hRLR;
-							if (b >= -1 && b <= 1) {
-								return rotateLeftOverRight_nl(nParent, n, hL0,
-										nR, nRL, hRR0, hRLR);
-							}
-						}
-					}
-					return rebalanceToRight_nl(n, nR, nRL, hRR0);
-				}
-			}
-		}
-	}
-
-	private Node<K, V> rotateRight_nl(final Node<K, V> nParent,
-			final Node<K, V> n, final Node<K, V> nL, final int hR,
-			final int hLL, final Node<K, V> nLR, final int hLR) {
+	private void rotateRight_nl(
+		final Node<K, V> nParent,
+		final Node<K, V> n,
+		final Node<K, V> nL,
+		final Node<K, V> nLR
+	) {
 		final long nodeOVL = n.changeOVL;
 		final long leftOVL = nL.changeOVL;
 
@@ -1265,40 +1163,16 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 			nLR.parent = n;
 		}
 
-		// fix up heights links
-		final int hNRepl = 1 + Math.max(hLR, hR);
-		n.height = hNRepl;
-		nL.height = 1 + Math.max(hLL, hNRepl);
-
 		nL.changeOVL = endGrow(leftOVL);
 		n.changeOVL = endShrink(nodeOVL);
-
-		// We have damaged nParent, n (now parent.child.right), and nL (now
-		// parent.child). n is the deepest. Perform as many fixes as we can
-		// with the locks we've got.
-
-		// We've already fixed the height for n, but it might still be outside
-		// our allowable balance range. In that case a simple fixHeight_nl
-		// won't help.
-		final int balN = hLR - hR;
-		if (balN < -1 || balN > 1) {
-			// we need another rotation at n
-			return n;
-		}
-
-		// we've already fixed the height at nL, do we need a rotation here?
-		final int balL = hLL - hNRepl;
-		if (balL < -1 || balL > 1) {
-			return nL;
-		}
-
-		// try to fix the parent height while we've still got the lock
-		return fixHeight_nl(nParent);
 	}
 
-	private Node<K, V> rotateLeft_nl(final Node<K, V> nParent,
-			final Node<K, V> n, final int hL, final Node<K, V> nR,
-			final Node<K, V> nRL, final int hRL, final int hRR) {
+	private void rotateLeft_nl(
+		final Node<K, V> nParent,
+		final Node<K, V> n,
+		final Node<K, V> nR,
+		final Node<K, V> nRL
+	) {
 		final long nodeOVL = n.changeOVL;
 		final long rightOVL = nR.changeOVL;
 
@@ -1324,30 +1198,16 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 			nRL.parent = n;
 		}
 
-		// fix up heights
-		final int hNRepl = 1 + Math.max(hL, hRL);
-		n.height = hNRepl;
-		nR.height = 1 + Math.max(hNRepl, hRR);
-
 		nR.changeOVL = endGrow(rightOVL);
 		n.changeOVL = endShrink(nodeOVL);
-
-		final int balN = hRL - hL;
-		if (balN < -1 || balN > 1) {
-			return n;
-		}
-
-		final int balR = hRR - hNRepl;
-		if (balR < -1 || balR > 1) {
-			return nR;
-		}
-
-		return fixHeight_nl(nParent);
 	}
 
-	private Node<K, V> rotateRightOverLeft_nl(final Node<K, V> nParent,
-			final Node<K, V> n, final Node<K, V> nL, final int hR,
-			final int hLL, final Node<K, V> nLR, final int hLRL) {
+	private void rotateRightOverLeft_nl(
+		final Node<K, V> nParent,
+		final Node<K, V> n,
+		final Node<K, V> nL,
+		final Node<K, V> nLR
+	) {
 		final long nodeOVL = n.changeOVL;
 		final long leftOVL = nL.changeOVL;
 		final long leftROVL = nLR.changeOVL;
@@ -1355,7 +1215,6 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 		final Node<K, V> nPL = nParent.left;
 		final Node<K, V> nLRL = nLR.left;
 		final Node<K, V> nLRR = nLR.right;
-		final int hLRR = height(nLRR);
 
 		if (STRUCT_MODS)
 			counts.get().structMods += 1;
@@ -1384,54 +1243,23 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 			nLRL.parent = nL;
 		}
 
-		// fix up heights
-		final int hNRepl = 1 + Math.max(hLRR, hR);
-		n.height = hNRepl;
-		final int hLRepl = 1 + Math.max(hLL, hLRL);
-		nL.height = hLRepl;
-		nLR.height = 1 + Math.max(hLRepl, hNRepl);
-
 		nLR.changeOVL = endGrow(leftROVL);
 		nL.changeOVL = endShrink(leftOVL);
 		n.changeOVL = endShrink(nodeOVL);
-
-		// caller should have performed only a single rotation if nL was going
-		// to end up damaged
-		assert (Math.abs(hLL - hLRL) <= 1);
-
-		// We have damaged nParent, nLR (now parent.child), and n (now
-		// parent.child.right). n is the deepest. Perform as many fixes as we
-		// can with the locks we've got.
-
-		// We've already fixed the height for n, but it might still be outside
-		// our allowable balance range. In that case a simple fixHeight_nl
-		// won't help.
-		final int balN = hLRR - hR;
-		if (balN < -1 || balN > 1) {
-			// we need another rotation at n
-			return n;
-		}
-
-		// we've already fixed the height at nLR, do we need a rotation here?
-		final int balLR = hLRepl - hNRepl;
-		if (balLR < -1 || balLR > 1) {
-			return nLR;
-		}
-
-		// try to fix the parent height while we've still got the lock
-		return fixHeight_nl(nParent);
 	}
 
-	private Node<K, V> rotateLeftOverRight_nl(final Node<K, V> nParent,
-			final Node<K, V> n, final int hL, final Node<K, V> nR,
-			final Node<K, V> nRL, final int hRR, final int hRLR) {
+	private void rotateLeftOverRight_nl(
+		final Node<K, V> nParent,
+		final Node<K, V> n,
+		final Node<K, V> nR,
+		final Node<K, V> nRL
+	) {
 		final long nodeOVL = n.changeOVL;
 		final long rightOVL = nR.changeOVL;
 		final long rightLOVL = nRL.changeOVL;
 
 		final Node<K, V> nPL = nParent.left;
 		final Node<K, V> nRLL = nRL.left;
-		final int hRLL = height(nRLL);
 		final Node<K, V> nRLR = nRL.right;
 
 		if (STRUCT_MODS)
@@ -1461,28 +1289,9 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 			nRLR.parent = nR;
 		}
 
-		// fix up heights
-		final int hNRepl = 1 + Math.max(hL, hRLL);
-		n.height = hNRepl;
-		final int hRRepl = 1 + Math.max(hRLR, hRR);
-		nR.height = hRRepl;
-		nRL.height = 1 + Math.max(hNRepl, hRRepl);
-
 		nRL.changeOVL = endGrow(rightLOVL);
 		nR.changeOVL = endShrink(rightOVL);
 		n.changeOVL = endShrink(nodeOVL);
-
-		assert (Math.abs(hRR - hRLR) <= 1);
-
-		final int balN = hRLL - hL;
-		if (balN < -1 || balN > 1) {
-			return n;
-		}
-		final int balRL = hRRepl - hNRepl;
-		if (balRL < -1 || balRL > 1) {
-			return nRL;
-		}
-		return fixHeight_nl(nParent);
 	}
 
 	// ////////////// iteration (node successor)
@@ -1718,17 +1527,17 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 
 		@Override
 		public int size() {
-			return LockBasedStanfordTreeMap.this.size();
+			return LockBasedStanfordTreeMapCb.this.size();
 		}
 
 		@Override
 		public boolean isEmpty() {
-			return LockBasedStanfordTreeMap.this.isEmpty();
+			return LockBasedStanfordTreeMapCb.this.isEmpty();
 		}
 
 		@Override
 		public void clear() {
-			LockBasedStanfordTreeMap.this.clear();
+			LockBasedStanfordTreeMapCb.this.clear();
 		}
 
 		@Override
@@ -1738,7 +1547,7 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 			}
 			final Object k = ((Entry<?, ?>) o).getKey();
 			final Object v = ((Entry<?, ?>) o).getValue();
-			final Object actualVo = LockBasedStanfordTreeMap.this.getImpl(k);
+			final Object actualVo = LockBasedStanfordTreeMapCb.this.getImpl(k);
 			if (actualVo == null) {
 				// no associated value
 				return false;
@@ -1760,7 +1569,7 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 			}
 			final Object k = ((Entry<?, ?>) o).getKey();
 			final Object v = ((Entry<?, ?>) o).getValue();
-			return LockBasedStanfordTreeMap.this.remove(k, v);
+			return LockBasedStanfordTreeMapCb.this.remove(k, v);
 		}
 
 		@Override
@@ -1810,7 +1619,7 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 
 		@Override
 		public void remove() {
-			LockBasedStanfordTreeMap.this.remove(mostRecentNode.key);
+			LockBasedStanfordTreeMapCb.this.remove(mostRecentNode.key);
 		}
 	}
 }

@@ -4,6 +4,7 @@ import java.util.AbstractMap;
 import java.util.Comparator;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.locks.ReentrantLock;
 
 import contention.abstractions.CompositionalMap;
@@ -24,7 +25,7 @@ import contention.abstractions.MaintenanceAlg;
  * @param <V>
  */
 
-public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
+public class LockBasedFriendlyTreeMapCB<K, V> extends AbstractMap<K, V> implements
 		CompositionalMap<K, V>, MaintenanceAlg {
 
 	static final boolean useFairLocks = false;
@@ -33,13 +34,12 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 	static final char Left = 'L';
 	static final char Right = 'R';
 	final V DELETED = (V) new Object();
-	static boolean TRAVERSAL_COUNT = true;
-	static boolean STRUCT_MODS = true;
+	static final boolean STRUCT_MODS = true;
 
 	private class MaintenanceThread extends Thread {
-		LockBasedFriendlyTreeMap<K, V> map;
+		LockBasedFriendlyTreeMapCB<K, V> map;
 
-		MaintenanceThread(LockBasedFriendlyTreeMap<K, V> map) {
+		MaintenanceThread(LockBasedFriendlyTreeMapCB<K, V> map) {
 			this.map = map;
 		}
 
@@ -58,7 +58,7 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 		K key;
 
 		class BalanceVars {
-			volatile int localh, lefth, righth;
+			volatile int selfCnt, leftCnt, rightCnt;
 		}
 
 		final BalanceVars bal = new BalanceVars();
@@ -75,36 +75,36 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 			this.lock = new ReentrantLock(useFairLocks);
 			this.right = null;
 			this.left = null;
-			this.bal.localh = 1;
-			this.bal.righth = 0;
-			this.bal.lefth = 0;
+			this.bal.selfCnt = 0;
+			this.bal.leftCnt = 0;
+			this.bal.rightCnt = 0;
 		}
 
-		Node(final K key, final int localh, final int lefth, final int righth,
-				final V value, final Node<K, V> left, final Node<K, V> right) {
-			this.key = key;
-			this.bal.localh = localh;
-			this.bal.righth = righth;
-			this.bal.lefth = lefth;
-			this.value = value;
-			this.left = left;
-			this.right = right;
-			this.lock = new ReentrantLock(useFairLocks);
-			this.removed = false;
-		}
+		// Node(final K key, final int localh, final int lefth, final int righth,
+		// 		final V value, final Node<K, V> left, final Node<K, V> right) {
+		// 	this.key = key;
+		// 	this.bal.localh = localh;
+		// 	this.bal.righth = righth;
+		// 	this.bal.lefth = lefth;
+		// 	this.value = value;
+		// 	this.left = left;
+		// 	this.right = right;
+		// 	this.lock = new ReentrantLock(useFairLocks);
+		// 	this.removed = false;
+		// }
 
-		void setupNode(final K key, final int localh, final int lefth,
-				final int righth, final V value, final Node<K, V> left,
-				final Node<K, V> right) {
-			this.key = key;
-			this.bal.localh = localh;
-			this.bal.righth = righth;
-			this.bal.lefth = lefth;
-			this.value = value;
-			this.left = left;
-			this.right = right;
-			this.removed = false;
-		}
+		// void setupNode(final K key, final int localh, final int lefth,
+		// 		final int righth, final V value, final Node<K, V> left,
+		// 		final Node<K, V> right) {
+		// 	this.key = key;
+		// 	this.bal.localh = localh;
+		// 	this.bal.righth = righth;
+		// 	this.bal.lefth = lefth;
+		// 	this.value = value;
+		// 	this.left = left;
+		// 	this.right = right;
+		// 	this.removed = false;
+		// }
 
 		Node<K, V> child(char dir) {
 			return dir == Left ? left : right;
@@ -120,10 +120,6 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 			} else {
 				right = node;
 			}
-		}
-
-		void updateLocalh() {
-			this.bal.localh = Math.max(this.bal.lefth + 1, this.bal.righth + 1);
 		}
 
 	}
@@ -144,12 +140,12 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 	}
 
 	// Constructors
-	public LockBasedFriendlyTreeMap() {
+	public LockBasedFriendlyTreeMapCB() {
 		// temporary
 		this.startMaintenance();
 	}
 
-	public LockBasedFriendlyTreeMap(final Comparator<? super K> comparator) {
+	public LockBasedFriendlyTreeMapCB(final Comparator<? super K> comparator) {
 		// temporary
 		this.startMaintenance();
 		this.comparator = comparator;
@@ -218,14 +214,17 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 					}
 					return null;
 				}
+				current.bal.selfCnt++;
 				if (TRAVERSAL_COUNT) {
 					finishCount(nodesTraversed);
 				}
 				return value;
 			}
 			if (rightCmp <= 0) {
+				current.bal.leftCnt++;
 				next = current.left;
 			} else {
+				current.bal.rightCnt++;
 				next = current.right;
 			}
 			if (TRAVERSAL_COUNT) {
@@ -436,14 +435,6 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 		n.removed = true;
 		n.lock.unlock();
 		parent.lock.unlock();
-		// System.out.println("removed a node");
-		// need to update balance values here
-		if (direction == Left) {
-			parent.bal.lefth = n.bal.localh - 1;
-		} else {
-			parent.bal.righth = n.bal.localh - 1;
-		}
-		parent.updateLocalh();
 		return true;
 	}
 
@@ -488,15 +479,6 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 		l.lock.unlock();
 		n.lock.unlock();
 		parent.lock.unlock();
-		// need to update balance values
-		l.bal.righth = newNode.bal.localh;
-		l.updateLocalh();
-		if (direction == Left) {
-			parent.bal.lefth = l.bal.localh;
-		} else {
-			parent.bal.righth = l.bal.localh;
-		}
-		parent.updateLocalh();
 		if (STRUCT_MODS) {
 			vars.rotations++;
 			counts.get().structMods++;
@@ -550,15 +532,6 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 		r.lock.unlock();
 		n.lock.unlock();
 		parent.lock.unlock();
-		// need to update balance values
-		r.bal.righth = newNode.bal.localh;
-		r.updateLocalh();
-		if (direction == Left) {
-			parent.bal.lefth = r.bal.localh;
-		} else {
-			parent.bal.righth = r.bal.localh;
-		}
-		parent.updateLocalh();
 		if (STRUCT_MODS) {
 			vars.rotations++;
 			counts.get().structMods++;
@@ -568,23 +541,6 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 	}
 
 	boolean propagate(Node<K, V> node) {
-		Node<K, V> lchild, rchild;
-
-		lchild = node.left;
-		rchild = node.right;
-
-		if (lchild == null) {
-			node.bal.lefth = 0;
-		} else {
-			node.bal.lefth = lchild.bal.localh;
-		}
-		if (rchild == null) {
-			node.bal.righth = 0;
-		} else {
-			node.bal.righth = rchild.bal.localh;
-		}
-
-		node.updateLocalh();
 		if (STRUCT_MODS)
 			vars.propogations++;
 
@@ -649,8 +605,7 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 		return ret;
 	}
 
-	boolean recursivePropagate(Node<K, V> parent, Node<K, V> node,
-			char direction) {
+	void recursivePropagate(Node<K, V> parent, Node<K, V> node, char direction) {
 		Node<K, V> left, right;
 
 		if (node == null)
@@ -658,15 +613,14 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 		left = node.left;
 		right = node.right;
 
-		if (!node.removed && node.value == DELETED
-				&& (left == null || right == null) && node != this.root) {
+		if (!node.removed && node.value == DELETED && (left == null || right == null) && node != this.root) {
 			if (removeNode(parent, direction)) {
-				return true;
+				return;
 			}
 		}
 
 		if (stop) {
-			return true;
+			return;
 		}
 
 		if (!node.removed) {
@@ -742,48 +696,6 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 		}
 		recursiveGetSize(node.left);
 		recursiveGetSize(node.right);
-	}
-
-	public int numNodes() {
-		this.size = 0;
-		ConcurrentHashMap<Integer, Node<K, V>> map = new ConcurrentHashMap<Integer, Node<K, V>>();
-		recursiveNumNodes(root.left, map);
-		return size;
-	}
-
-	void recursiveNumNodes(Node<K, V> node,
-			ConcurrentHashMap<Integer, Node<K, V>> map) {
-		if (node == null)
-			return;
-		if (node.removed) {
-			// System.out.println("Shouldn't find removed nodes in the get size function");
-		}
-		Node<K, V> n = map.putIfAbsent((Integer) node.key, node);
-		if (n != null) {
-			System.out.println("Error: " + node.key);
-		}
-		this.size++;
-		recursiveNumNodes(node.left, map);
-		recursiveNumNodes(node.right, map);
-	}
-
-	public int getBalance() {
-		int lefth = 0, righth = 0;
-		if (root.left == null)
-			return 0;
-		lefth = recursiveDepth(root.left.left);
-		righth = recursiveDepth(root.left.right);
-		return lefth - righth;
-	}
-
-	int recursiveDepth(Node<K, V> node) {
-		if (node == null) {
-			return 0;
-		}
-		int lefth, righth;
-		lefth = recursiveDepth(node.left);
-		righth = recursiveDepth(node.right);
-		return Math.max(lefth, righth) + 1;
 	}
 
 	@Override

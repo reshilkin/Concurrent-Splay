@@ -72,11 +72,8 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 	// public class OptTreeMap<K,V> extends AbstractMap<K,V> implements
 	// ConcurrentMap<K,V> {
 
-
-	static final int ThreadNum = Integer.parseInt(System.getProperty("THREAD_NUM", "1"));
-
 	private double rotateProb() {
-		return 1.0 / (10 * ThreadNum);
+		return 1.0 / (10 * threadNum);
 	}
 
 	/**
@@ -130,6 +127,13 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 	private static final long OVLGrowCountMask = ((1L << OVLBitsBeforeOverflow) - 1) << OVLGrowCountShift;
 	private static final long OVLShrinkCountShift = OVLGrowCountShift
 			+ OVLBitsBeforeOverflow;
+	private int threadNum = 8;
+	private double k = 1.2;
+
+	void InitParamsFromEnv() {
+		threadNum = Integer.parseInt(System.getProperty("THREAD_NUM", "1"));
+		k = Double.parseDouble(System.getProperty("K1", "1"));
+	}
 
 	private static long beginGrow(final long ovl) {
 		assert (!isChangingOrUnlinked(ovl));
@@ -194,10 +198,26 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 		volatile Node<K, V> left;
 		volatile Node<K, V> right;
 		// Contended ?
+		@jdk.internal.vm.annotation.Contended
 		volatile int selfCnt;
+		@jdk.internal.vm.annotation.Contended
 		volatile int leftCnt;
-		// Выкинуть ?
-		volatile int rightCnt;
+
+		int selfCnt() {
+			return selfCnt - leftCnt() - rightCnt();
+		}
+
+		int leftCnt() {
+			return leftCnt;
+		}
+
+		int rightCnt() {
+			Node<K, V> t = right;
+			if (t == null) {
+				return 0;
+			}
+			return t.selfCnt;
+		}
 
 		Node(
 			final K key,
@@ -215,7 +235,6 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 			this.right = right;
 			this.selfCnt = 0;
 			this.leftCnt = 0;
-			this.rightCnt = 0;
 		}
 
 		Node<K, V> child(char dir) {
@@ -279,13 +298,13 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 	private final EntrySet entries = new EntrySet();
 
 	private void rebalance(Node<K, V> parent, Node<K, V> node) {
-		int nodePlusLeftCount = node.selfCnt + node.leftCnt;
-		int nodePlusRightCount = node.selfCnt + node.rightCnt;
-		int parentPlusRightCount = parent.selfCnt + parent.rightCnt;
-		int parentPlusLeftCount = parent.selfCnt + parent.leftCnt;
-		int nodeRightCount = node.rightCnt;
-		int nodeLeftCount = node.leftCnt;
-		double k = 1.2;
+
+		int nodePlusLeftCount = node.selfCnt() + node.leftCnt();
+		int nodePlusRightCount = node.selfCnt() + node.rightCnt();
+		int parentPlusRightCount = parent.selfCnt() + parent.rightCnt();
+		int parentPlusLeftCount = parent.selfCnt() + parent.leftCnt();
+		int nodeRightCount = node.rightCnt();
+		int nodeLeftCount = node.leftCnt();
 
 		//decide whether to perform zig−zag step
 		if (nodeRightCount >= k * parentPlusRightCount){
@@ -304,9 +323,10 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 											node,
 											rightChild
 										);
-										parent.leftCnt = rightChild.rightCnt;
-										node.rightCnt = rightChild.leftCnt;
-										rightChild.rightCnt += parentPlusRightCount;
+										parent.selfCnt += rightChild.rightCnt() - parent.leftCnt();
+										parent.leftCnt = rightChild.rightCnt();
+										node.selfCnt += rightChild.leftCnt() - node.rightCnt();
+										rightChild.selfCnt += parentPlusRightCount + nodePlusLeftCount;
 										rightChild.leftCnt += nodePlusLeftCount;
 									}
 								}
@@ -331,10 +351,9 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 											node,
 											leftChild
 										);
-										parent.rightCnt = leftChild.leftCnt;
-										node.leftCnt = leftChild.rightCnt;
-										leftChild.leftCnt += parentPlusLeftCount;
-										leftChild.rightCnt += nodePlusRightCount;
+										parent.selfCnt += leftChild.leftCnt() - parent.rightCnt();
+										node.selfCnt += leftChild.rightCnt() - node.leftCnt();
+										leftChild.selfCnt += parentPlusLeftCount + nodePlusRightCount;
 									}
 								}
 							}
@@ -351,8 +370,9 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 						if (parent.left == node) {
 							synchronized (node) {
 								rotateRight_nl(grand, parent, node, node.right);
-								parent.leftCnt = node.rightCnt;
-								node.rightCnt += parentPlusRightCount;
+								parent.selfCnt += node.rightCnt() - parent.leftCnt();
+								parent.leftCnt = node.rightCnt();
+								node.selfCnt += parentPlusRightCount;
 							}
 						}
 					}
@@ -366,7 +386,8 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 						if (parent.right == node) {
 							synchronized (node) {
 								rotateLeft_nl(grand, parent, node, node.left);
-								parent.rightCnt = node.leftCnt;
+								parent.selfCnt += node.leftCnt() - parent.rightCnt();
+								node.selfCnt += parentPlusLeftCount;
 								node.leftCnt += parentPlusLeftCount;
 							}
 						}
@@ -379,9 +400,11 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 	// ////////////// public interface
 
 	public LockBasedStanfordTreeMapCb() {
+		InitParamsFromEnv();
 	}
 
 	public LockBasedStanfordTreeMapCb(final Comparator<? super K> comparator) {
+		InitParamsFromEnv();
 		this.comparator = comparator;
 	}
 
@@ -528,6 +551,9 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 				}
 				return null;
 			} else {
+				if (doRebalance) {
+					child.selfCnt += 1;
+				}
 				final int childCmp = k.compareTo(child.key);
 				if (childCmp == 0) {
 					// how we got here is irrelevant
@@ -535,7 +561,6 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 						finishCount2(nodesTraversed);
 					}
 					if (doRebalance) {
-						child.selfCnt += 1;
 						rebalance(node, child);
 					}
 					return child.vOpt;
@@ -580,8 +605,6 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 					if (doRebalance) {
 						if (childCmp < 0) {
 							child.leftCnt += 1;
-						} else {
-							child.rightCnt += 1;
 						}
 					}
 					final Object vo = attemptGet(k, child, (childCmp < 0 ? Left

@@ -197,18 +197,21 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 		volatile long changeOVL;
 		volatile Node<K, V> left;
 		volatile Node<K, V> right;
-		// Contended ?
 		@jdk.internal.vm.annotation.Contended
 		volatile int selfCnt;
 		@jdk.internal.vm.annotation.Contended
-		volatile int leftCnt;
+		volatile int treeCnt;
 
 		int selfCnt() {
-			return selfCnt - leftCnt() - rightCnt();
+			return selfCnt;
 		}
 
 		int leftCnt() {
-			return leftCnt;
+			Node<K, V> t = left;
+			if (t == null) {
+				return 0;
+			}
+			return t.treeCnt;
 		}
 
 		int rightCnt() {
@@ -216,7 +219,7 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 			if (t == null) {
 				return 0;
 			}
-			return t.selfCnt;
+			return t.treeCnt;
 		}
 
 		Node(
@@ -234,7 +237,7 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 			this.left = left;
 			this.right = right;
 			this.selfCnt = 0;
-			this.leftCnt = 0;
+			this.treeCnt = 0;
 		}
 
 		Node<K, V> child(char dir) {
@@ -323,11 +326,10 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 											node,
 											rightChild
 										);
-										parent.selfCnt += rightChild.rightCnt() - parent.leftCnt();
-										parent.leftCnt = rightChild.rightCnt();
-										node.selfCnt += rightChild.leftCnt() - node.rightCnt();
-										rightChild.selfCnt += parentPlusRightCount + nodePlusLeftCount;
-										rightChild.leftCnt += nodePlusLeftCount;
+
+										parent.treeCnt = rightChild.rightCnt() + parent.leftCnt() + parent.selfCnt();
+										node.treeCnt = node.leftCnt() + rightChild.leftCnt() + node.selfCnt();
+										rightChild.treeCnt = rightChild.selfCnt() + node.treeCnt + parent.treeCnt;
 									}
 								}
 							}
@@ -351,9 +353,9 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 											node,
 											leftChild
 										);
-										parent.selfCnt += leftChild.leftCnt() - parent.rightCnt();
-										node.selfCnt += leftChild.rightCnt() - node.leftCnt();
-										leftChild.selfCnt += parentPlusLeftCount + nodePlusRightCount;
+										parent.treeCnt = leftChild.leftCnt() + parent.rightCnt() + parent.selfCnt();
+										node.treeCnt = node.rightCnt() + leftChild.rightCnt() + node.selfCnt();
+										leftChild.treeCnt = leftChild.selfCnt() + node.treeCnt + parent.treeCnt;
 									}
 								}
 							}
@@ -370,9 +372,8 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 						if (parent.left == node) {
 							synchronized (node) {
 								rotateRight_nl(grand, parent, node, node.right);
-								parent.selfCnt += node.rightCnt() - parent.leftCnt();
-								parent.leftCnt = node.rightCnt();
-								node.selfCnt += parentPlusRightCount;
+								parent.treeCnt = parent.selfCnt() + node.rightCnt() + parent.rightCnt();
+								node.treeCnt = node.selfCnt() + node.leftCnt() + parent.selfCnt();
 							}
 						}
 					}
@@ -386,9 +387,8 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 						if (parent.right == node) {
 							synchronized (node) {
 								rotateLeft_nl(grand, parent, node, node.left);
-								parent.selfCnt += node.leftCnt() - parent.rightCnt();
-								node.selfCnt += parentPlusLeftCount;
-								node.leftCnt += parentPlusLeftCount;
+								parent.treeCnt = parent.selfCnt() + node.leftCnt() + parent.leftCnt();
+								node.treeCnt = node.selfCnt() + node.rightCnt() + parent.selfCnt();
 							}
 						}
 					}
@@ -552,7 +552,7 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 				return null;
 			} else {
 				if (doRebalance) {
-					child.selfCnt += 1;
+					child.treeCnt += 1;
 				}
 				final int childCmp = k.compareTo(child.key);
 				if (childCmp == 0) {
@@ -561,6 +561,7 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 						finishCount2(nodesTraversed);
 					}
 					if (doRebalance) {
+						child.selfCnt += 1;
 						rebalance(node, child);
 					}
 					return child.vOpt;
@@ -602,11 +603,6 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 					// traversals were definitely okay. This means that we are
 					// no longer vulnerable to node shrinks, and we don't need
 					// to validate nodeOVL any more.
-					if (doRebalance) {
-						if (childCmp < 0) {
-							child.leftCnt += 1;
-						}
-					}
 					final Object vo = attemptGet(k, child, (childCmp < 0 ? Left
 							: Right), childOVL, doRebalance);
 					if (vo != SpecialRetry) {

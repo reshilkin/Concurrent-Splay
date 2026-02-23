@@ -326,10 +326,9 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 											node,
 											rightChild
 										);
-
-										parent.treeCnt = rightChild.rightCnt() + parent.leftCnt() + parent.selfCnt();
-										node.treeCnt = node.leftCnt() + rightChild.leftCnt() + node.selfCnt();
-										rightChild.treeCnt = rightChild.selfCnt() + node.treeCnt + parent.treeCnt;
+										parent.treeCnt = parent.rightCnt() + parent.leftCnt() + parent.selfCnt();
+										node.treeCnt = node.rightCnt() + node.leftCnt() + node.selfCnt();
+										rightChild.treeCnt = rightChild.selfCnt() + rightChild.leftCnt() + rightChild.rightCnt();
 									}
 								}
 							}
@@ -353,9 +352,9 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 											node,
 											leftChild
 										);
-										parent.treeCnt = leftChild.leftCnt() + parent.rightCnt() + parent.selfCnt();
-										node.treeCnt = node.rightCnt() + leftChild.rightCnt() + node.selfCnt();
-										leftChild.treeCnt = leftChild.selfCnt() + node.treeCnt + parent.treeCnt;
+										parent.treeCnt = parent.rightCnt() + parent.leftCnt() + parent.selfCnt();
+										node.treeCnt = node.rightCnt() + node.leftCnt() + node.selfCnt();
+										leftChild.treeCnt = leftChild.selfCnt() + leftChild.leftCnt() + leftChild.rightCnt();
 									}
 								}
 							}
@@ -372,8 +371,8 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 						if (parent.left == node) {
 							synchronized (node) {
 								rotateRight_nl(grand, parent, node, node.right);
-								parent.treeCnt = parent.selfCnt() + node.rightCnt() + parent.rightCnt();
-								node.treeCnt = node.selfCnt() + node.leftCnt() + parent.selfCnt();
+								parent.treeCnt = parent.rightCnt() + parent.leftCnt() + parent.selfCnt();
+								node.treeCnt = node.rightCnt() + node.leftCnt() + node.selfCnt();
 							}
 						}
 					}
@@ -387,8 +386,8 @@ public class LockBasedStanfordTreeMapCb<K, V> extends AbstractMap<K, V> implemen
 						if (parent.right == node) {
 							synchronized (node) {
 								rotateLeft_nl(grand, parent, node, node.left);
-								parent.treeCnt = parent.selfCnt() + node.leftCnt() + parent.leftCnt();
-								node.treeCnt = node.selfCnt() + node.rightCnt() + parent.selfCnt();
+								parent.treeCnt = parent.rightCnt() + parent.leftCnt() + parent.selfCnt();
+								node.treeCnt = node.rightCnt() + node.leftCnt() + node.selfCnt();
 							}
 						}
 					}

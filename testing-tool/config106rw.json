@@ -1,0 +1,31 @@
+{
+    "repo_dir": "/home/ashilkin/Concurrent-Splay",
+    "config_dir": "/home/ashilkin/json_templates",
+    "result": "/home/ashilkin/results",
+    "iterations": 3,
+    "class_name": [
+        "LockBasedStanfordTreeMapCb",
+        "LockBasedStanfordTreeMap"
+    ],
+    "distribution": [
+        "zipf",
+        "99-1",
+        "95-5"
+    ],
+    "threads": "1, 7, 63",
+    "inv_splay_prob": [
+        1
+    ],
+    "max_depth": [
+        3
+    ],
+    "k1": [
+        1.4
+    ],
+    "k2": [
+        0.5
+    ],
+    "size": 1000000,
+    "fill": 0.5,
+    "rw": 0.1
+}
